@@ -1,4 +1,5 @@
-name: Ubuntu
+# Build PR and main with multiple compiler/arch combinations, then compare binary sizes.
+name: Ubuntu Build and Size Report
 
 on:
   pull_request:
@@ -13,37 +14,256 @@ permissions:
   pull-requests: write
 
 jobs:
-  size-diff:
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64
+          - label: x86_64 gcc
+            key: x86_64-gcc
+            runs_on: ubuntu-24.04
+            extra_packages: 'libturbojpeg0-dev libpng-dev libwebp-dev libgles-dev'
+            cc: gcc
+            cxx: g++
+            c_args: ''
+            cpp_args: ''
+            c_link_args: ''
+            cpp_link_args: ''
+
+          - label: x86_64 clang
+            key: x86_64-clang
+            runs_on: ubuntu-24.04
+            extra_packages: 'clang lld libomp-dev libturbojpeg0-dev libpng-dev libwebp-dev libgles-dev'
+            cc: clang
+            cxx: clang++
+            c_args: ''
+            cpp_args: ''
+            c_link_args: ''
+            cpp_link_args: ''
+
+          # x86 32-bit — skip 64-bit dev libs so meson uses internal loaders
+          - label: x86 gcc (32-bit)
+            key: x86-gcc
+            runs_on: ubuntu-24.04
+            extra_packages: 'gcc-multilib g++-multilib'
+            cc: gcc
+            cxx: g++
+            c_args: '-m32'
+            cpp_args: '-m32'
+            c_link_args: '-m32'
+            cpp_link_args: '-m32'
+
+          # arm64 (GitHub ARM runner)
+          - label: arm64 gcc
+            key: arm64-gcc
+            runs_on: ubuntu-24.04-arm
+            extra_packages: 'libturbojpeg0-dev libpng-dev libwebp-dev libgles-dev'
+            cc: gcc
+            cxx: g++
+            c_args: ''
+            cpp_args: ''
+            c_link_args: ''
+            cpp_link_args: ''
+
+          - label: arm64 clang
+            key: arm64-clang
+            runs_on: ubuntu-24.04-arm
+            extra_packages: 'clang lld libomp-dev libturbojpeg0-dev libpng-dev libwebp-dev libgles-dev'
+            cc: clang
+            cxx: clang++
+            c_args: ''
+            cpp_args: ''
+            c_link_args: ''
+            cpp_link_args: ''
 
     steps:
+    # Single checkout — both builds use the same directory to avoid path-dependent size diffs
     - uses: actions/checkout@v4
       with:
-        path: pr-merged
-        submodules: true
-        fetch-depth: 0
-
-    - uses: actions/checkout@v4
-      with:
-        ref: refs/heads/main
-        path: current-main
         submodules: true
         fetch-depth: 0
 
     - name: Install Packages
+      env:
+        EXTRA_PACKAGES: ${{ matrix.extra_packages }}
       run: |
+        packages=(meson ninja-build libgtest-dev libasan5 valgrind curl jq software-properties-common)
+        if [ -n "$EXTRA_PACKAGES" ]; then
+          for pkg in $EXTRA_PACKAGES; do
+            packages+=("$pkg")
+          done
+        fi
         sudo apt-get update
-        sudo apt-get install meson ninja-build libgtest-dev libasan5 valgrind curl jq software-properties-common libturbojpeg0-dev libpng-dev libwebp-dev libgles-dev
+        sudo apt-get install -y "${packages[@]}"
 
-    - name: Build PR merged result
-      working-directory: pr-merged
+    # Build both, strip, collect sizes into a single TSV per matrix entry
+    - name: Build and collect sizes
+      env:
+        CC: ${{ matrix.cc }}
+        CXX: ${{ matrix.cxx }}
+        C_ARGS: ${{ matrix.c_args }}
+        CPP_ARGS: ${{ matrix.cpp_args }}
+        C_LINK_ARGS: ${{ matrix.c_link_args }}
+        CPP_LINK_ARGS: ${{ matrix.cpp_link_args }}
+        MATRIX_KEY: ${{ matrix.key }}
+        MATRIX_LABEL: ${{ matrix.label }}
       run: |
-        meson setup build-pr -Dloaders="all" -Dengines="cpu, gl" -Dsavers="all" -Dbindings="capi" --optimization=s --buildtype=minsize --errorlogs
-        meson compile -C build-pr -j $(nproc)
+        LIB_NAME="libthorvg-1.so.1.0.0"
 
-    - name: Build current main
-      working-directory: current-main
+        build_thorvg() {
+          local src_dir="$1" build_dir="$2"
+          local meson_args=(
+            -Dloaders="all"
+            -Dengines="cpu, gl"
+            -Dsavers="all"
+            -Dbindings="capi"
+            --optimization=s
+            --errorlogs
+          )
+          [ -n "$C_ARGS" ]        && meson_args+=("-Dc_args=$C_ARGS")
+          [ -n "$CPP_ARGS" ]      && meson_args+=("-Dcpp_args=$CPP_ARGS")
+          [ -n "$C_LINK_ARGS" ]   && meson_args+=("-Dc_link_args=$C_LINK_ARGS")
+          [ -n "$CPP_LINK_ARGS" ] && meson_args+=("-Dcpp_link_args=$CPP_LINK_ARGS")
+          meson setup "$build_dir" "$src_dir" "${meson_args[@]}"
+          meson compile -C "$build_dir" -j $(nproc)
+        }
+
+        # Save PR ref, build main first, then switch back to PR
+        PR_REF=$(git rev-parse HEAD)
+        git checkout origin/main
+        build_thorvg . build-main
+
+        git checkout "$PR_REF"
+        build_thorvg . build-pr
+
+        # dump raw size output for debugging + report parsing
+        mkdir -p ci-report
+        for tag_dir in pr:build-pr main:build-main; do
+          tag="${tag_dir%%:*}"
+          dir="${tag_dir##*:}"
+          lib="$dir/src/$LIB_NAME"
+          strip "$lib"
+          size "$lib" > "ci-report/${MATRIX_KEY}.${tag}.size"
+        done
+        $CXX --version | head -1 > "ci-report/${MATRIX_KEY}.compiler"
+
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: size-${{ matrix.key }}
+        path: ci-report/
+
+  report:
+    name: Size Report
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: ci-report
+        pattern: size-*
+        merge-multiple: true
+
+    - name: Generate summary
       run: |
-        meson setup build-main -Dloaders="all" -Dengines="cpu, gl" -Dsavers="all" -Dbindings="capi" --optimization=s --buildtype=minsize --errorlogs
-        meson compile -C build-main -j $(nproc)
+        python3 -u - <<'PY'
+        import os, pathlib, re
 
+        root = pathlib.Path("ci-report")
+        summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+
+        def parse_size_file(path):
+            """Parse 'size' command output, return (text, data, total)."""
+            lines = path.read_text().splitlines()
+            if len(lines) < 2:
+                return None
+            cols = lines[1].split()
+            text, data = int(cols[0]), int(cols[1])
+            return {"text": text, "data": data, "total": text + data}
+
+        # Collect: {key: {"pr": {...}, "main": {...}}}
+        results = {}
+        for f in sorted(root.glob("*.size")):
+            key, tag = f.stem.rsplit(".", 1)  # e.g. "x86_64-gcc.pr" -> key, tag
+            results.setdefault(key, {})[tag] = parse_size_file(f)
+
+        compilers = {}
+        for f in sorted(root.glob("*.compiler")):
+            compilers[f.stem] = f.read_text().strip()
+
+        if not results:
+            summary.write_text("## Binary Size\n\nNo data collected.\n")
+            raise SystemExit(0)
+
+        def delta(base, pr):
+            diff = pr - base
+            pct = (diff / base * 100) if base else 0
+            sign = "+" if diff > 0 else ""
+            return f"{sign}{diff} ({sign}{pct:.2f}%)"
+
+        lines = ["## Binary Size (`libthorvg-1.so.1.0.0`, stripped, `-Os`)", ""]
+
+        # Summary table
+        lines += [
+            "| Config | main | PR | Delta |",
+            "|--------|-----:|---:|------:|",
+        ]
+        for key, sizes in results.items():
+            m, p = sizes.get("main"), sizes.get("pr")
+            if not m or not p:
+                lines.append(f"| {key} | n/a | n/a | n/a |")
+                continue
+            lines.append(f"| {key} | {m['total']:,} | {p['total']:,} | {delta(m['total'], p['total'])} |")
+
+        # Detail table
+        lines += [
+            "", "<details><summary>Detail (text / data)</summary>", "",
+            "| Config | main text | main data | PR text | PR data | Delta |",
+            "|--------|----------:|----------:|--------:|--------:|------:|",
+        ]
+        for key, sizes in results.items():
+            m, p = sizes.get("main"), sizes.get("pr")
+            if not m or not p:
+                lines.append(f"| {key} | n/a | n/a | n/a | n/a | n/a |")
+                continue
+            lines.append(
+                f"| {key} | {m['text']:,} | {m['data']:,} "
+                f"| {p['text']:,} | {p['data']:,} | {delta(m['total'], p['total'])} |"
+            )
+
+        # Compiler info
+        lines += [
+            "", "</details>", "",
+            "<details><summary>Compilers</summary>", "",
+        ]
+        for key, ver in compilers.items():
+            lines.append(f"- **{key}**: `{ver}`")
+        lines += ["", "</details>"]
+
+        report = "\n".join(lines) + "\n"
+        summary.write_text(report)
+        pathlib.Path("report.md").write_text(report)
+        PY
+
+    - name: Comment on PR
+      if: github.event_name == 'pull_request'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Delete previous bot comment if exists, then post new one
+        PR_NUM=${{ github.event.pull_request.number }}
+        COMMENT_TAG="<!-- size-report -->"
+        echo "$COMMENT_TAG" >> report.md
+
+        # Find and delete old comment
+        OLD_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" \
+          --jq ".[] | select(.body | contains(\"$COMMENT_TAG\")) | .id" | head -1)
+        if [ -n "$OLD_ID" ]; then
+          gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${OLD_ID}"
+        fi
+
+        gh pr comment "$PR_NUM" --body-file report.md
