@@ -129,7 +129,14 @@ jobs:
           [ -n "$CPP_LINK_ARGS" ] && meson_args+=("-Dcpp_link_args=$CPP_LINK_ARGS")
           meson setup "$build_dir" "$src_dir" "${meson_args[@]}"
           meson compile -C "$build_dir" -j $(nproc)
+
+          # save meson args once (same for both builds)
+          if [ ! -f "ci-report/${MATRIX_KEY}.mesonargs" ]; then
+            printf '%s\n' "${meson_args[@]}" > "ci-report/${MATRIX_KEY}.mesonargs"
+          fi
         }
+
+        mkdir -p ci-report
 
         # Save PR ref, build main first, then switch back to PR
         PR_REF=$(git rev-parse HEAD)
@@ -140,7 +147,6 @@ jobs:
         build_thorvg . build-pr
 
         # dump raw size output for debugging + report parsing
-        mkdir -p ci-report
         for tag_dir in pr:build-pr main:build-main; do
           tag="${tag_dir%%:*}"
           dir="${tag_dir##*:}"
@@ -243,6 +249,20 @@ jobs:
         for key, ver in compilers.items():
             lines.append(f"- **{key}**: `{ver}`")
         lines += ["", "</details>"]
+
+        # Build options
+        mesonargs = {}
+        for f in sorted(root.glob("*.mesonargs")):
+            mesonargs[f.stem] = f.read_text().strip()
+
+        if mesonargs:
+            lines += ["", "<details><summary>Build options</summary>", ""]
+            for key, args in mesonargs.items():
+                lines.append(f"**{key}**")
+                lines.append(f"```")
+                lines.append(f"meson setup {args}")
+                lines.append(f"```")
+            lines += ["", "</details>"]
 
         report = "\n".join(lines) + "\n"
         summary.write_text(report)
