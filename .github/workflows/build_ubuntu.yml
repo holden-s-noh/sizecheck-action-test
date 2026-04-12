@@ -1,0 +1,49 @@
+name: Ubuntu
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  size-diff:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: pr-merged
+        submodules: true
+        fetch-depth: 0
+
+    - uses: actions/checkout@v4
+      with:
+        ref: refs/heads/main
+        path: current-main
+        submodules: true
+        fetch-depth: 0
+
+    - name: Install Packages
+      run: |
+        sudo apt-get update
+        sudo apt-get install meson ninja-build libgtest-dev libasan5 valgrind curl jq software-properties-common libturbojpeg0-dev libpng-dev libwebp-dev libgles-dev
+
+    - name: Build PR merged result
+      working-directory: pr-merged
+      run: |
+        meson setup build-pr -Dloaders="all" -Dengines="cpu, gl" -Dsavers="all" -Dbindings="capi" --optimization=s --buildtype=minsize --errorlogs
+        meson compile -C build-pr -j $(nproc)
+
+    - name: Build current main
+      working-directory: current-main
+      run: |
+        meson setup build-main -Dloaders="all" -Dengines="cpu, gl" -Dsavers="all" -Dbindings="capi" --optimization=s --buildtype=minsize --errorlogs
+        meson compile -C build-main -j $(nproc)
+
