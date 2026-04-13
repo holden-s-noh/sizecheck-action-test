@@ -1,5 +1,5 @@
 # Build PR and main with multiple compiler/arch combinations, then compare binary sizes.
-name: Ubuntu Build and Size Report
+name: Size Diff Reporter
 
 on:
   pull_request:
@@ -41,7 +41,7 @@ jobs:
             c_link_args: ''
             cpp_link_args: ''
 
-          # x86 32-bit — skip 64-bit dev libs so meson uses internal loaders
+          # x86 32-bit 
           - label: x86 gcc (32-bit)
             key: x86-gcc
             runs_on: ubuntu-24.04
@@ -77,7 +77,6 @@ jobs:
             cpp_link_args: ''
 
     steps:
-    # Single checkout — both builds use the same directory to avoid path-dependent size diffs
     - uses: actions/checkout@v4
       with:
         submodules: true
@@ -135,9 +134,13 @@ jobs:
 
         mkdir -p ci-report
 
-        # Save PR ref, build main first, then switch back to PR
+        # Compare PR against the merge-base with main, so unrelated
+        # main-side changes don't pollute the size delta.
         PR_REF=$(git rev-parse HEAD)
-        git checkout origin/main
+        BASE_REF=$(git merge-base HEAD origin/main)
+        echo "PR:   $PR_REF"
+        echo "BASE: $BASE_REF (merge-base with origin/main)"
+        git checkout "$BASE_REF"
         build_thorvg . build-main
 
         git checkout "$PR_REF"
@@ -215,7 +218,7 @@ jobs:
             "| Config | main | PR | Delta |",
             "|--------|-----:|---:|------:|",
         ]
-        for key, sizes in results.items():
+        for key, sizes in sorted(results.items()):
             m, p = sizes.get("main"), sizes.get("pr")
             if not m or not p:
                 lines.append(f"| {key} | n/a | n/a | n/a |")
@@ -228,7 +231,7 @@ jobs:
             "| Config | main text | main data | PR text | PR data | Delta |",
             "|--------|----------:|----------:|--------:|--------:|------:|",
         ]
-        for key, sizes in results.items():
+        for key, sizes in sorted(results.items()):
             m, p = sizes.get("main"), sizes.get("pr")
             if not m or not p:
                 lines.append(f"| {key} | n/a | n/a | n/a | n/a | n/a |")
