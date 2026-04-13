@@ -86,7 +86,7 @@ jobs:
       env:
         EXTRA_PACKAGES: ${{ matrix.extra_packages }}
       run: |
-        packages=(meson ninja-build libgtest-dev libasan5 valgrind curl jq software-properties-common)
+        packages=(meson ninja-build)
         if [ -n "$EXTRA_PACKAGES" ]; then
           for pkg in $EXTRA_PACKAGES; do
             packages+=("$pkg")
