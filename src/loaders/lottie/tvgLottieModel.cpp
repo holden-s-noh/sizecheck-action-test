@@ -600,41 +600,12 @@ LottieLayer::~LottieLayer()
 
 LottieProperty* LottieLayer::property(uint16_t ix)
 {
-    if (transform) {
-        if (auto property = transform->property(ix)) return property;
-    }
-
-    return LottieGroup::property(ix);
+    return nullptr;
 }
 
 
 void LottieLayer::prepare(RGB32* color)
 {
-    /* if layer is hidden, only useful data is its transform matrix.
-       so force it to be a Null Layer and release all resource. */
-    if (hidden) {
-        type = LottieLayer::Null;
-        ARRAY_FOREACH(p, children) delete(*p);
-        children.reset();
-        return;
-    }
-
-    //prepare the viewport clipper
-    if (type == LottieLayer::Precomp) {
-        auto clipper = Shape::gen();
-        clipper->appendRect(0.0f, 0.0f, w, h);
-        clipper->ref();
-        statical.pooler.push(clipper);
-    //prepare solid fill in advance if it is a layer type.
-    } else if (color && type == LottieLayer::Solid) {
-        auto solidFill = Shape::gen();
-        solidFill->appendRect(0, 0, static_cast<float>(w), static_cast<float>(h));
-        solidFill->fill(color->r, color->g, color->b);
-        solidFill->ref();
-        statical.pooler.push(solidFill);
-    }
-
-    LottieGroup::prepare(LottieObject::Layer);
 }
 
 
@@ -649,14 +620,6 @@ float LottieLayer::remap(LottieComposition* comp, float frameNo, LottieExpressio
 
 bool LottieLayer::assign(const char* layer, uint32_t ix, const char* var, float val)
 {
-    //find the target layer by name
-    auto target = layerById(djb2Encode(layer));
-    if (!target) return false;
-
-    //find the target property by ix
-    auto property = target->property(ix);
-    if (property && property->exp) return property->exp->assign(var, val);
-
     return false;
 }
 
